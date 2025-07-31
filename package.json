@@ -1,0 +1,78 @@
+{
+  "name": "vite-plugin-single-image-format",
+  "version": "1.0.0-dev.0",
+  "description": "vite-plugin-single-image-format is a Vite/Rollup plugin that converts every raster asset in your build to a single output format – webp, png or avif. It can optionally re‑compress images that are already in the target format and automatically rewrites all references in HTML/CSS/JS.",
+  "author": "ux-ui.pro",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ux-ui-pro/vite-plugin-single-image-format.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ux-ui-pro/vite-plugin-single-image-format/issues"
+  },
+  "homepage": "https://github.com/ux-ui-pro/vite-plugin-single-image-format",
+  "sideEffects": false,
+  "scripts": {
+    "clean": "rimraf dist",
+    "build": "vite build",
+    "lint:ts": "eslint src/**/*.ts",
+    "lint:fix:ts": "eslint src/**/*.ts --fix",
+    "format:ts": "prettier --write src/**/*.ts",
+    "lint:fix": "yarn lint:fix:ts && yarn format:ts"
+  },
+  "source": "src/index.ts",
+  "main": "dist/index.cjs.js",
+  "module": "dist/index.es.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.cjs.js",
+      "import": "./dist/index.es.js"
+    },
+    "./dist/*": "./dist/*"
+  },
+  "files": [
+    "dist/"
+  ],
+  "devDependencies": {
+    "@eslint/js": "9.32.0",
+    "@rollup/plugin-terser": "0.4.4",
+    "@types/node": "24.1.0",
+    "@typescript-eslint/eslint-plugin": "8.38.0",
+    "@typescript-eslint/parser": "8.38.0",
+    "eslint": "9.32.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-import-resolver-typescript": "4.4.4",
+    "eslint-plugin-import": "2.32.0",
+    "globals": "16.3.0",
+    "prettier": "3.6.2",
+    "rimraf": "6.0.1",
+    "typescript": "5.8.3",
+    "vite": "7.0.6",
+    "vite-plugin-dts": "4.5.4"
+  },
+  "peerDependencies": {
+    "sharp": "0.34.3"
+  },
+  "optionalDependencies": {
+    "sharp": "0.34.3"
+  },
+  "keywords": [
+    "vite",
+    "vite-plugin",
+    "rollup-plugin",
+    "sharp",
+    "image-format",
+    "image-conversion",
+    "image-optimization",
+    "asset-compression",
+    "webp",
+    "png",
+    "avif",
+    "webp-converter",
+    "avif-converter",
+    "build-optimization",
+    "frontend-performance"
+  ]
+}
