@@ -1,6 +1,6 @@
 {
   "name": "vite-plugin-single-image-format",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "vite-plugin-single-image-format is a Vite/Rollup plugin that converts every raster asset in your build to a single output format – webp, png or avif. It can optionally re‑compress images that are already in the target format and automatically rewrites all references in HTML/CSS/JS.",
   "author": "ux-ui.pro",
   "license": "MIT",

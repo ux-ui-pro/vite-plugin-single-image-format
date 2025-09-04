@@ -66,7 +66,8 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
   const avifOpts: Required<AvifOptions> = { ...defaultAvif, ...userAvif };
 
   const rasterExtRE = /\.(png|jpe?g|webp|gif|avif|heif|heic|tiff?|bmp|jp2)$/i;
-  const textExts = ['.html', '.css', '.js', '.mjs', '.ts'];
+  const textExts = ['.html', '.css', '.js', '.mjs', '.ts', '.jsx', '.tsx'];
+  const KEEP_FLAG = 'imgfmt=keep';
 
   const dimensionMap = new Map<string, { width: number; height: number }>();
 
@@ -134,6 +135,32 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
     return `<img ${preAttrs}src=${quote}${src}${quote}${postAttrs}${extraW}${extraH}${selfClose}>`;
   }
 
+  function escapeRe(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function stripKeepFromQuery(qsAndHash: string): string {
+    const [qsPartRaw, hashPart = ''] = qsAndHash.split('#', 2);
+    const hasQ = qsPartRaw.startsWith('?');
+    const qsPart = hasQ ? qsPartRaw.slice(1) : qsPartRaw;
+
+    if (!qsPart) {
+      return (hasQ ? '?' : '') + (hashPart ? '#' + hashPart : '');
+    }
+
+    const keptParams = qsPart
+      .split('&')
+      .filter(Boolean)
+      .filter((p) => {
+        const [k, v = ''] = p.split('=', 2);
+        return !(k === 'imgfmt' && v === 'keep');
+      });
+
+    const rebuilt = keptParams.length ? '?' + keptParams.join('&') : '';
+
+    return rebuilt + (hashPart ? '#' + hashPart : '');
+  }
+
   return {
     name: 'vite-plugin-single-image-format',
     apply: 'build',
@@ -141,19 +168,64 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
 
     async generateBundle(_options: NormalizedOutputOptions, bundle: OutputBundle): Promise<void> {
       const renameMap = new Map<string, string>();
+      const keepSet = new Set<string>();
+
+      const textPayloads: string[] = [];
+
+      for (const asset of Object.values(bundle)) {
+        if (asset.type !== 'asset') continue;
+        if (!textExts.some((ext) => asset.fileName.endsWith(ext))) continue;
+
+        textPayloads.push(asset.source.toString());
+      }
+
+      if (textPayloads.length > 0) {
+        for (const [fileName, asset] of Object.entries(bundle)) {
+          if (asset.type !== 'asset' || !rasterExtRE.test(fileName)) continue;
+
+          const needle = `${fileName}?${KEEP_FLAG}`;
+
+          if (textPayloads.some((txt) => txt.includes(needle))) {
+            keepSet.add(fileName);
+          }
+        }
+      }
 
       for (const [fileName, asset] of Object.entries(bundle)) {
         if (asset.type !== 'asset' || !rasterExtRE.test(fileName)) continue;
 
-        const isTargetExt = fileName.toLowerCase().endsWith(`.${format}`);
         const inputBuffer: Buffer =
           typeof asset.source === 'string' ? Buffer.from(asset.source) : Buffer.from(asset.source);
 
-        if (isTargetExt && !reencode) {
-          const meta = await sharp(inputBuffer).metadata();
+        if (keepSet.has(fileName)) {
+          try {
+            const meta = await sharp(inputBuffer).metadata();
 
-          if (meta.width && meta.height) {
-            dimensionMap.set(fileName, { width: meta.width, height: meta.height });
+            if (meta.width && meta.height) {
+              dimensionMap.set(fileName, { width: meta.width, height: meta.height });
+            }
+          } catch (err) {
+            if (process?.env?.NODE_ENV === 'development') {
+              console.debug('[singleImageFormat] metadata probe failed (keep)', err);
+            }
+          }
+
+          continue;
+        }
+
+        const isTargetExt = fileName.toLowerCase().endsWith(`.${format}`);
+
+        if (isTargetExt && !reencode) {
+          try {
+            const meta = await sharp(inputBuffer).metadata();
+
+            if (meta.width && meta.height) {
+              dimensionMap.set(fileName, { width: meta.width, height: meta.height });
+            }
+          } catch (err) {
+            if (process?.env?.NODE_ENV === 'development') {
+              console.debug('[singleImageFormat] metadata probe failed (passthrough)', err);
+            }
           }
 
           continue;
@@ -167,7 +239,6 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
               : await sharp(inputBuffer).avif(avifOpts).toBuffer();
 
         const outMeta = await sharp(outputBuffer).metadata();
-
         const size =
           outMeta.width && outMeta.height
             ? { width: outMeta.width, height: outMeta.height }
@@ -182,7 +253,14 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
         }
 
         const newName = fileName.replace(rasterExtRE, `.${format}`);
-        if (bundle[newName]) continue;
+
+        if (bundle[newName]) {
+          if (size) dimensionMap.set(fileName, size);
+
+          asset.source = outputBuffer;
+
+          continue;
+        }
 
         this.emitFile({ type: 'asset', fileName: newName, source: outputBuffer });
 
@@ -210,6 +288,45 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
           }
 
           asset.source = code;
+        }
+      }
+
+      {
+        const keepList = Array.from(keepSet);
+
+        if (keepList.length > 0) {
+          for (const asset of Object.values(bundle)) {
+            if (asset.type !== 'asset') continue;
+            if (!textExts.some((ext) => asset.fileName.endsWith(ext))) continue;
+
+            let code = asset.source.toString();
+
+            for (const fileName of keepList) {
+              const re = new RegExp(
+                `(${escapeRe(fileName)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
+                'g',
+              );
+
+              code = code.replace(
+                re,
+                (_m: string, fname: string, qPart?: string, hashPart?: string) => {
+                  if (!qPart) return fname + (hashPart ?? '');
+
+                  const cleaned = stripKeepFromQuery((qPart || '') + (hashPart || ''));
+
+                  return fname + cleaned;
+                },
+              );
+
+              const simple = new RegExp(
+                `(${escapeRe(fileName)})\\?${KEEP_FLAG}(?![^"'\\s)><#])`,
+                'g',
+              );
+              code = code.replace(simple, '$1');
+            }
+
+            asset.source = code;
+          }
         }
       }
 
