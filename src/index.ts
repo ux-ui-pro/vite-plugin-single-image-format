@@ -1,5 +1,6 @@
 import type { Plugin } from 'vite';
 import type { OutputBundle, NormalizedOutputOptions } from 'rollup';
+import { posix as pathPosix } from 'path';
 import sharp from 'sharp';
 
 export interface WebpOptions {
@@ -170,23 +171,48 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
       const renameMap = new Map<string, string>();
       const keepSet = new Set<string>();
 
-      const textPayloads: string[] = [];
+      const textAssets: { fileName: string; code: string }[] = [];
 
       for (const asset of Object.values(bundle)) {
         if (asset.type !== 'asset') continue;
         if (!textExts.some((ext) => asset.fileName.endsWith(ext))) continue;
 
-        textPayloads.push(asset.source.toString());
+        textAssets.push({ fileName: asset.fileName, code: asset.source.toString() });
       }
 
-      if (textPayloads.length > 0) {
-        for (const [fileName, asset] of Object.entries(bundle)) {
-          if (asset.type !== 'asset' || !rasterExtRE.test(fileName)) continue;
+      if (textAssets.length > 0) {
+        for (const [rasterName, asset] of Object.entries(bundle)) {
+          if (asset.type !== 'asset' || !rasterExtRE.test(rasterName)) continue;
 
-          const needle = `${fileName}?${KEEP_FLAG}`;
+          let shouldKeep = false;
 
-          if (textPayloads.some((txt) => txt.includes(needle))) {
-            keepSet.add(fileName);
+          for (const ta of textAssets) {
+            const fromDir = pathPosix.dirname(ta.fileName);
+            const rel = pathPosix.relative(fromDir, rasterName);
+
+            const candidates = new Set<string>();
+
+            candidates.add(rasterName);
+            candidates.add(rel);
+
+            if (!rel.startsWith('.') && !rel.startsWith('/')) {
+              candidates.add('./' + rel);
+            }
+
+            for (const cand of candidates) {
+              const needle = `${cand}?${KEEP_FLAG}`;
+
+              if (ta.code.includes(needle)) {
+                shouldKeep = true;
+                break;
+              }
+            }
+
+            if (shouldKeep) break;
+          }
+
+          if (shouldKeep) {
+            keepSet.add(rasterName);
           }
         }
       }
@@ -276,15 +302,35 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
           if (asset.type !== 'asset') continue;
           if (!textExts.some((ext) => asset.fileName.endsWith(ext))) continue;
 
+          const fromDir = pathPosix.dirname(asset.fileName);
+
           let code = asset.source.toString();
 
           for (const [oldName, newName] of renameMap) {
-            const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const oldRel = pathPosix.relative(fromDir, oldName);
+            const newRel = pathPosix.relative(fromDir, newName);
 
-            code = code.replace(
-              new RegExp(`([./]*)${escaped}`, 'g'),
-              (_m: string, p1: string) => `${p1}${newName}`,
-            );
+            const variantPairs: Array<[string, string]> = [
+              [oldName, newName],
+              [oldRel, newRel],
+            ];
+
+            if (!oldRel.startsWith('.') && !oldRel.startsWith('/')) {
+              variantPairs.push([`./${oldRel}`, `./${newRel}`]);
+            }
+
+            for (const [fromPath, toPath] of variantPairs) {
+              const re = new RegExp(
+                `(${escapeRe(fromPath)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
+                'g',
+              );
+
+              code = code.replace(
+                re,
+                (_m: string, _p: string, qPart?: string, hashPart?: string) =>
+                  `${toPath}${qPart ?? ''}${hashPart ?? ''}`,
+              );
+            }
           }
 
           asset.source = code;
@@ -299,30 +345,44 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
             if (asset.type !== 'asset') continue;
             if (!textExts.some((ext) => asset.fileName.endsWith(ext))) continue;
 
+            const fromDir = pathPosix.dirname(asset.fileName);
+
             let code = asset.source.toString();
 
             for (const fileName of keepList) {
-              const re = new RegExp(
-                `(${escapeRe(fileName)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
-                'g',
-              );
+              const rel = pathPosix.relative(fromDir, fileName);
+              const candidates = new Set<string>();
 
-              code = code.replace(
-                re,
-                (_m: string, fname: string, qPart?: string, hashPart?: string) => {
-                  if (!qPart) return fname + (hashPart ?? '');
+              candidates.add(fileName);
+              candidates.add(rel);
 
-                  const cleaned = stripKeepFromQuery((qPart || '') + (hashPart || ''));
+              if (!rel.startsWith('.') && !rel.startsWith('/')) {
+                candidates.add('./' + rel);
+              }
 
-                  return fname + cleaned;
-                },
-              );
+              for (const cand of candidates) {
+                const re = new RegExp(
+                  `(${escapeRe(cand)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
+                  'g',
+                );
 
-              const simple = new RegExp(
-                `(${escapeRe(fileName)})\\?${KEEP_FLAG}(?![^"'\\s)><#])`,
-                'g',
-              );
-              code = code.replace(simple, '$1');
+                code = code.replace(
+                  re,
+                  (_m: string, fname: string, qPart?: string, hashPart?: string) => {
+                    if (!qPart) return fname + (hashPart ?? '');
+
+                    const cleaned = stripKeepFromQuery((qPart || '') + (hashPart || ''));
+
+                    return fname + cleaned;
+                  },
+                );
+
+                const simple = new RegExp(
+                  `(${escapeRe(cand)})\\?${KEEP_FLAG}(?![^"'\\s)><#])`,
+                  'g',
+                );
+                code = code.replace(simple, '$1');
+              }
             }
 
             asset.source = code;

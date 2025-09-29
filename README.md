@@ -1,4 +1,3 @@
-
 <div align="center">
 <br>
 
@@ -12,6 +11,7 @@ It can optionally re-compress images that are already in the target format and a
 [![NPM Downloads](https://img.shields.io/npm/dm/vite-plugin-single-image-format.svg?style=flat)](https://www.npmjs.org/package/vite-plugin-single-image-format)
 </div>
 <br>
+
 
 ➠ **Install**
 
