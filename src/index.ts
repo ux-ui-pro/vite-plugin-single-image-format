@@ -1,6 +1,7 @@
 import type { Plugin } from 'vite';
 import type { OutputBundle, NormalizedOutputOptions } from 'rollup';
 import { posix as pathPosix } from 'path';
+import { createHash } from 'crypto';
 import sharp from 'sharp';
 
 export interface WebpOptions {
@@ -31,6 +32,8 @@ export interface SingleImageFormatOptions {
   png?: PngOptions;
   avif?: AvifOptions;
   htmlSizeMode?: HtmlSizeMode;
+  hashInName?: boolean;
+  hashLength?: number;
 }
 
 export default function singleImageFormat(userOpts: SingleImageFormatOptions = {}): Plugin {
@@ -41,6 +44,8 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
     png: userPng = {},
     avif: userAvif = {},
     htmlSizeMode = 'add-only',
+    hashInName = false,
+    hashLength = 8,
   } = userOpts;
 
   const defaultWebp: Required<WebpOptions> = {
@@ -162,6 +167,18 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
     return rebuilt + (hashPart ? '#' + hashPart : '');
   }
 
+  function computeContentHash(buffer: Buffer, length: number): string {
+    const full = createHash('sha256').update(buffer).digest('hex');
+    const len = Math.max(1, Math.min(length, full.length));
+    return full.slice(0, len);
+  }
+
+  function addHashToFileName(fileName: string, hash: string, delimiter = '-'): string {
+    const parsed = pathPosix.parse(fileName);
+    const base = `${parsed.name}${delimiter}${hash}${parsed.ext}`;
+    return parsed.dir ? `${parsed.dir}/${base}` : base;
+  }
+
   return {
     name: 'vite-plugin-single-image-format',
     apply: 'build',
@@ -242,11 +259,11 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
         const isTargetExt = fileName.toLowerCase().endsWith(`.${format}`);
 
         if (isTargetExt && !reencode) {
+          let size: { width: number; height: number } | undefined;
           try {
             const meta = await sharp(inputBuffer).metadata();
-
             if (meta.width && meta.height) {
-              dimensionMap.set(fileName, { width: meta.width, height: meta.height });
+              size = { width: meta.width, height: meta.height };
             }
           } catch (err) {
             if (process?.env?.NODE_ENV === 'development') {
@@ -254,6 +271,23 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
             }
           }
 
+          if (!hashInName) {
+            if (size) dimensionMap.set(fileName, size);
+            continue;
+          }
+
+          const hash = computeContentHash(inputBuffer, hashLength);
+          const hashedName = addHashToFileName(fileName, hash);
+
+          if (bundle[hashedName]) {
+            if (size) dimensionMap.set(fileName, size);
+            continue;
+          }
+
+          this.emitFile({ type: 'asset', fileName: hashedName, source: inputBuffer });
+          renameMap.set(fileName, hashedName);
+          if (size) dimensionMap.set(hashedName, size);
+          delete bundle[fileName];
           continue;
         }
 
@@ -278,7 +312,10 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
           continue;
         }
 
-        const newName = fileName.replace(rasterExtRE, `.${format}`);
+        const targetName = fileName.replace(rasterExtRE, `.${format}`);
+        const newName = hashInName
+          ? addHashToFileName(targetName, computeContentHash(outputBuffer, hashLength))
+          : targetName;
 
         if (bundle[newName]) {
           if (size) dimensionMap.set(fileName, size);

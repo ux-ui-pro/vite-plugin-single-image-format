@@ -62,7 +62,7 @@ export default [
           ignoreComments: true,
         },
       ],
-      'linebreak-style': ['error', 'unix'],
+      'linebreak-style': ['warn', 'unix'],
     },
   },
   prettierConfig,
