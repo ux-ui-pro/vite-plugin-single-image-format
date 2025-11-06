@@ -4,7 +4,7 @@
 <h1>vite-plugin-single-image-format</h1>
 
 **vite-plugin-single-image-format** is a Vite/Rollup plugin that converts **every raster asset** in your build to **a single output format** – `webp`, `png` **or** `avif`.
-It can optionally re-compress images that are already in the target format and automatically rewrites all references in HTML/CSS/JS. It can also add or correct intrinsic `width`/`height` on `<img>` tags in generated HTML.
+It can optionally re-compress images that are already in the target format and automatically rewrites all references in HTML/CSS/JS. It can also add or correct intrinsic `width`/`height` on `<img>` tags in generated HTML, and normalizes `<source type>` in `<picture>` to match the actual format of `srcset` entries (e.g. `image/webp`), removing incorrect/duplicate type attributes.
 
 [![npm](https://img.shields.io/npm/v/vite-plugin-single-image-format.svg?colorB=brightgreen)](https://www.npmjs.com/package/vite-plugin-single-image-format)
 [![GitHub package version](https://img.shields.io/github/package-json/v/ux-ui-pro/vite-plugin-single-image-format.svg)](https://github.com/ux-ui-pro/vite-plugin-single-image-format)
@@ -50,6 +50,33 @@ export default defineConfig({
   ],
 });
 ```
+
+<br>
+
+➠ **HTML post-processing**
+
+- Adds or corrects intrinsic `width`/`height` on `<img>` (see `htmlSizeMode`).
+- Normalizes `<source type>` in `<picture>` based on the real extensions in `srcset`:
+  - Replaces an incorrect `type` if present, or adds it if missing.
+  - Works automatically; no extra options required.
+
+Example:
+
+```html
+<!-- before -->
+<picture>
+  <source type="image/png" srcset="/src/img/a.png 1x, /src/img/b.png 2x">
+  <img src="/src/img/b.png" alt="">
+</picture>
+
+<!-- after -->
+<picture>
+  <source type="image/webp" srcset="./assets/img/a-xxxx.webp 1x, ./assets/img/b-yyyy.webp 2x">
+  <img src="./assets/img/b-yyyy.webp" alt="">
+</picture>
+```
+
+> Note: If `srcset` entries remain in their original format (e.g. via `?imgfmt=keep` or when converting is skipped), the `type` will reflect that format.
 
 <br>
 

@@ -167,15 +167,71 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
     return rebuilt + (hashPart ? '#' + hashPart : '');
   }
 
+  function hasGenericAttr(str: string, attrName: string): boolean {
+    const re = new RegExp(`\\b${attrName}\\s*=`, 'i');
+
+    return re.test(str);
+  }
+
+  function stripNamedAttr(str: string, attrName: string): string {
+    const re = new RegExp(
+      String.raw`(^|\s+)${attrName}\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`,
+      'gi',
+    );
+
+    return str.replace(re, '$1');
+  }
+
+  function extToMime(ext: string): string | null {
+    const e = ext.toLowerCase();
+
+    if (e === 'webp') return 'image/webp';
+    if (e === 'png') return 'image/png';
+    if (e === 'avif') return 'image/avif';
+    if (e === 'jpg' || e === 'jpeg') return 'image/jpeg';
+    if (e === 'gif') return 'image/gif';
+    if (e === 'svg') return 'image/svg+xml';
+    if (e === 'bmp') return 'image/bmp';
+    if (e === 'tif' || e === 'tiff') return 'image/tiff';
+    if (e === 'heif') return 'image/heif';
+    if (e === 'heic') return 'image/heic';
+    if (e === 'jp2') return 'image/jp2';
+
+    return null;
+  }
+
+  function pickMimeFromSrcset(srcset: string): string | null {
+    const entries = srcset
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    for (const entry of entries) {
+      const urlPart = entry.split(/\s+/)[0] || '';
+      const cleaned = urlPart.split(/[?#]/)[0];
+      const m = cleaned.match(/\.([a-z0-9]+)$/i);
+
+      if (m && m[1]) {
+        const mime = extToMime(m[1]);
+
+        if (mime) return mime;
+      }
+    }
+
+    return null;
+  }
+
   function computeContentHash(buffer: Buffer, length: number): string {
     const full = createHash('sha256').update(buffer).digest('hex');
     const len = Math.max(1, Math.min(length, full.length));
+
     return full.slice(0, len);
   }
 
   function addHashToFileName(fileName: string, hash: string, delimiter = '-'): string {
     const parsed = pathPosix.parse(fileName);
     const base = `${parsed.name}${delimiter}${hash}${parsed.ext}`;
+
     return parsed.dir ? `${parsed.dir}/${base}` : base;
   }
 
@@ -221,6 +277,7 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
 
               if (ta.code.includes(needle)) {
                 shouldKeep = true;
+
                 break;
               }
             }
@@ -260,8 +317,10 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
 
         if (isTargetExt && !reencode) {
           let size: { width: number; height: number } | undefined;
+
           try {
             const meta = await sharp(inputBuffer).metadata();
+
             if (meta.width && meta.height) {
               size = { width: meta.width, height: meta.height };
             }
@@ -273,6 +332,7 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
 
           if (!hashInName) {
             if (size) dimensionMap.set(fileName, size);
+
             continue;
           }
 
@@ -281,13 +341,18 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
 
           if (bundle[hashedName]) {
             if (size) dimensionMap.set(fileName, size);
+
             continue;
           }
 
           this.emitFile({ type: 'asset', fileName: hashedName, source: inputBuffer });
+
           renameMap.set(fileName, hashedName);
+
           if (size) dimensionMap.set(hashedName, size);
+
           delete bundle[fileName];
+
           continue;
         }
 
@@ -424,6 +489,46 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
 
             asset.source = code;
           }
+        }
+      }
+
+      {
+        for (const asset of Object.values(bundle)) {
+          if (asset.type !== 'asset') continue;
+          if (!asset.fileName.endsWith('.html')) continue;
+
+          const html = asset.source.toString();
+          const sourceTagRE =
+            /<source\s+([^>]*?)srcset=(["'])([^"']+)\2([^>]*?)(\/?)>/gi;
+
+          const newHtml = html.replace(
+            sourceTagRE,
+            (
+              full: string,
+              preAttrs: string,
+              quote: '"' | "'",
+              srcset: string,
+              postAttrs: string,
+              selfClose: string,
+            ): string => {
+              const desiredMime = pickMimeFromSrcset(srcset);
+
+              if (!desiredMime) return full;
+
+              const hasType = hasGenericAttr(preAttrs + postAttrs, 'type');
+
+              if (hasType) {
+                const newPre = stripNamedAttr(preAttrs, 'type');
+                const newPost = stripNamedAttr(postAttrs, 'type');
+
+                return `<source ${newPre}srcset=${quote}${srcset}${quote}${newPost} type="${desiredMime}"${selfClose}>`;
+              }
+
+              return `<source ${preAttrs}srcset=${quote}${srcset}${quote}${postAttrs} type="${desiredMime}"${selfClose}>`;
+            },
+          );
+
+          asset.source = newHtml;
         }
       }
 
