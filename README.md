@@ -4,7 +4,7 @@
 <h1>vite-plugin-single-image-format</h1>
 
 **vite-plugin-single-image-format** is a Vite/Rollup plugin that converts **every raster asset** in your build to **a single output format** – `webp`, `png` **or** `avif`.
-It can optionally re-compress images that are already in the target format and automatically rewrites all references in HTML/CSS/JS. It can also add or correct intrinsic `width`/`height` on `<img>` tags in generated HTML, and normalizes `<source type>` in `<picture>` to match the actual format of `srcset` entries (e.g. `image/webp`), removing incorrect/duplicate type attributes.
+It can optionally re-compress images that are already in the target format and automatically rewrites all references in HTML/CSS/JS (including JS output chunks, e.g. `new URL('./img.png', import.meta.url)`). It can also add or correct intrinsic `width`/`height` on `<img>` tags in generated HTML, and normalizes `<source type>` in `<picture>` to match the actual format of `srcset` entries (e.g. `image/webp`), removing incorrect/duplicate type attributes.
 
 [![npm](https://img.shields.io/npm/v/vite-plugin-single-image-format.svg?colorB=brightgreen)](https://www.npmjs.com/package/vite-plugin-single-image-format)
 [![GitHub package version](https://img.shields.io/github/package-json/v/ux-ui-pro/vite-plugin-single-image-format.svg)](https://github.com/ux-ui-pro/vite-plugin-single-image-format)
@@ -12,8 +12,7 @@ It can optionally re-compress images that are already in the target format and a
 </div>
 <br>
 
-➠ **Install**
-
+# Install
 ```bash
 # yarn
 yarn add -D vite-plugin-single-image-format
@@ -27,8 +26,7 @@ npm i -D vite-plugin-single-image-format
 
 <br>
 
-➠ **Quick Start**
-
+# Quick Start
 ```ts
 // vite.config.ts
 import { defineConfig } from 'vite';
@@ -53,8 +51,7 @@ export default defineConfig({
 
 <br>
 
-➠ **HTML post-processing**
-
+# HTML post-processing
 - Adds or corrects intrinsic `width`/`height` on `<img>` (see `htmlSizeMode`).
 - Normalizes `<source type>` in `<picture>` based on the real extensions in `srcset`:
   - Replaces an incorrect `type` if present, or adds it if missing.
@@ -80,8 +77,7 @@ Example:
 
 <br>
 
-➠ **Options**
-
+# Options
 |     Field      |                                 Type                                 |   Default    | Description                                                               |
 |:--------------:|:--------------------------------------------------------------------:|:------------:|:--------------------------------------------------------------------------|
 |    `format`    |               `'webp'` &#124; `'png'` &#124; `'avif'`                |   `'webp'`   | Output image format after build.                                          |
@@ -95,8 +91,7 @@ Example:
 
 <br>
 
-➠ **Default `webp` options**
-
+# Default `webp` options
 |      Option      | Default | Description                    |
 |:----------------:|:-------:|:-------------------------------|
 |    `quality`     |  `88`   | RGB quality (1-100).           |
@@ -105,8 +100,7 @@ Example:
 
 <br>
 
-➠ **Default `png` options**
-
+# Default `png` options
 |       Option        | Default | Description                                                        |
 |:-------------------:|:-------:|:-------------------------------------------------------------------|
 |      `quality`      |  `80`   | Palette quantisation quality (1-100) – used when `palette = true`. |
@@ -116,8 +110,7 @@ Example:
 
 <br>
 
-➠ **Default `avif` options**
-
+# Default `avif` options
 |   Option   | Default | Description                                             |
 |:----------:|:-------:|:--------------------------------------------------------|
 | `quality`  |  `60`   | Visual quality (0-100).                                 |
@@ -126,8 +119,7 @@ Example:
 
 <br>
 
-➠ **Local opt-out: `?imgfmt=keep`**
-
+# Local opt-out: `?imgfmt=keep`
 You can prevent conversion/renaming **per image** by appending a query flag to its reference. The asset will pass through **unchanged**, but dimensions will still be collected (when possible) for HTML sizing.
 
 ```html
@@ -139,13 +131,13 @@ Notes
 
 - When `hashInName` is enabled, assets marked with `?imgfmt=keep` are left as-is (the flag is removed from references in final code).
 - Passthrough case (already in target format and `reencode: false`) will still receive a hashed filename and updated references when `hashInName: true`.
+- Works for references found in generated JS chunks as well (e.g. URLs produced via `import.meta.url`).
 
 > Tip: You can use the flag in imports, templates, or HTML — anywhere the path is visible to Vite’s pipeline.
 
 <br>
 
-➠ **Content hash in filename**
-
+# Content hash in filename
 When `hashInName: true`, output names include a content hash computed from the final bytes (after conversion), e.g.:
 
 ```
@@ -158,8 +150,7 @@ icons/logo.webp     → icons/logo-f0c1a9b3.webp  (passthrough)
 
 <br>
 
-➠ **Supported input formats**
-
+# Supported input formats
 ```
 png, jpg/jpeg, webp, gif, avif, heif/heic, tiff, bmp, jp2
 ```
@@ -167,6 +158,5 @@ png, jpg/jpeg, webp, gif, avif, heif/heic, tiff, bmp, jp2
 
 <br>
 
-➠ **License**
-
+# License
 MIT

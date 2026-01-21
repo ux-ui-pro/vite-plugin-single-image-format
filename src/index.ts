@@ -1,8 +1,13 @@
 import type { Plugin } from 'vite';
-import type { OutputBundle, NormalizedOutputOptions } from 'rollup';
+import type { OutputBundle, NormalizedOutputOptions, SourceMap as RollupSourceMap } from 'rollup';
 import { posix as pathPosix } from 'path';
 import { createHash } from 'crypto';
 import sharp from 'sharp';
+import MagicString from 'magic-string';
+import remapping, {
+  type SourceMapInput as RemappingSourceMapInput,
+  type SourceMapLoader as RemappingSourceMapLoader,
+} from '@ampproject/remapping';
 
 export interface WebpOptions {
   quality?: number;
@@ -76,6 +81,38 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
   const KEEP_FLAG = 'imgfmt=keep';
 
   const dimensionMap = new Map<string, { width: number; height: number }>();
+
+  type TextRef = { fileName: string; code: string };
+
+  function isTextLikeAssetFileName(fileName: string): boolean {
+    return textExts.some((ext) => fileName.endsWith(ext));
+  }
+
+  function isChunkFileName(fileName: string): boolean {
+    return fileName.endsWith('.js') || fileName.endsWith('.mjs') || fileName.endsWith('.cjs');
+  }
+
+  function collectTextRefs(bundle: OutputBundle): TextRef[] {
+    const refs: TextRef[] = [];
+
+    for (const item of Object.values(bundle)) {
+      if (item.type === 'asset') {
+        if (!isTextLikeAssetFileName(item.fileName)) continue;
+
+        refs.push({ fileName: item.fileName, code: item.source.toString() });
+
+        continue;
+      }
+
+      if (item.type === 'chunk') {
+        if (!isChunkFileName(item.fileName)) continue;
+
+        refs.push({ fileName: item.fileName, code: item.code });
+      }
+    }
+
+    return refs;
+  }
 
   function hasAttr(str: string, attr: 'width' | 'height'): boolean {
     const re = new RegExp(`\\b${attr}\\s*=`, 'i');
@@ -167,6 +204,167 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
     return rebuilt + (hashPart ? '#' + hashPart : '');
   }
 
+  function applyRenameMapToString(
+    code: string,
+    fromDir: string,
+    renameMap: Map<string, string>,
+  ): string {
+    let next = code;
+
+    for (const [oldName, newName] of renameMap) {
+      const oldRel = pathPosix.relative(fromDir, oldName);
+      const newRel = pathPosix.relative(fromDir, newName);
+
+      const variantPairs: Array<[string, string]> = [
+        [oldName, newName],
+        [oldRel, newRel],
+      ];
+
+      if (!oldRel.startsWith('.') && !oldRel.startsWith('/')) {
+        variantPairs.push([`./${oldRel}`, `./${newRel}`]);
+      }
+
+      for (const [fromPath, toPath] of variantPairs) {
+        const re = new RegExp(
+          `(${escapeRe(fromPath)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
+          'g',
+        );
+
+        next = next.replace(
+          re,
+          (_m: string, _p: string, qPart?: string, hashPart?: string) =>
+            `${toPath}${qPart ?? ''}${hashPart ?? ''}`,
+        );
+      }
+    }
+
+    return next;
+  }
+
+  function applyKeepStripToString(code: string, fromDir: string, keepList: string[]): string {
+    let next = code;
+
+    for (const fileName of keepList) {
+      const rel = pathPosix.relative(fromDir, fileName);
+      const candidates = new Set<string>();
+
+      candidates.add(fileName);
+      candidates.add(rel);
+
+      if (!rel.startsWith('.') && !rel.startsWith('/')) {
+        candidates.add('./' + rel);
+      }
+
+      for (const cand of candidates) {
+        const re = new RegExp(
+          `(${escapeRe(cand)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
+          'g',
+        );
+
+        next = next.replace(
+          re,
+          (_m: string, fname: string, qPart?: string, hashPart?: string) => {
+            if (!qPart) return fname + (hashPart ?? '');
+
+            const cleaned = stripKeepFromQuery((qPart || '') + (hashPart || ''));
+
+            return fname + cleaned;
+          },
+        );
+
+        const simple = new RegExp(`(${escapeRe(cand)})\\?${KEEP_FLAG}(?![^"'\\s)><#])`, 'g');
+        next = next.replace(simple, '$1');
+      }
+    }
+
+    return next;
+  }
+
+  function applyRenameMapToMagicString(
+    ms: MagicString,
+    originalCode: string,
+    fromDir: string,
+    renameMap: Map<string, string>,
+  ): void {
+    for (const [oldName, newName] of renameMap) {
+      const oldRel = pathPosix.relative(fromDir, oldName);
+      const newRel = pathPosix.relative(fromDir, newName);
+
+      const variantPairs: Array<[string, string]> = [
+        [oldName, newName],
+        [oldRel, newRel],
+      ];
+
+      if (!oldRel.startsWith('.') && !oldRel.startsWith('/')) {
+        variantPairs.push([`./${oldRel}`, `./${newRel}`]);
+      }
+
+      for (const [fromPath, toPath] of variantPairs) {
+        const re = new RegExp(
+          `(${escapeRe(fromPath)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
+          'g',
+        );
+
+        let m: RegExpExecArray | null;
+
+        while ((m = re.exec(originalCode))) {
+          const qPart = m[2] ?? '';
+          const hashPart = m[3] ?? '';
+          const replacement = `${toPath}${qPart}${hashPart}`;
+
+          ms.overwrite(m.index, m.index + m[0].length, replacement);
+        }
+      }
+    }
+  }
+
+  function applyKeepStripToMagicString(
+    ms: MagicString,
+    originalCode: string,
+    fromDir: string,
+    keepList: string[],
+  ): void {
+    for (const fileName of keepList) {
+      const rel = pathPosix.relative(fromDir, fileName);
+      const candidates = new Set<string>();
+
+      candidates.add(fileName);
+      candidates.add(rel);
+
+      if (!rel.startsWith('.') && !rel.startsWith('/')) {
+        candidates.add('./' + rel);
+      }
+
+      for (const cand of candidates) {
+        const re = new RegExp(
+          `(${escapeRe(cand)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
+          'g',
+        );
+
+        let m: RegExpExecArray | null;
+
+        while ((m = re.exec(originalCode))) {
+          const fname = m[1] ?? '';
+          const qPart = m[2] ?? '';
+          const hashPart = m[3] ?? '';
+
+          if (!qPart) continue;
+
+          const cleaned = stripKeepFromQuery(qPart + hashPart);
+          const replacement = fname + cleaned;
+
+          ms.overwrite(m.index, m.index + m[0].length, replacement);
+        }
+
+        const simple = new RegExp(`(${escapeRe(cand)})\\?${KEEP_FLAG}(?![^"'\\s)><#])`, 'g');
+
+        while ((m = simple.exec(originalCode))) {
+          ms.overwrite(m.index, m.index + m[0].length, m[1] ?? '');
+        }
+      }
+    }
+  }
+
   function hasGenericAttr(str: string, attrName: string): boolean {
     const re = new RegExp(`\\b${attrName}\\s*=`, 'i');
 
@@ -244,22 +442,15 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
       const renameMap = new Map<string, string>();
       const keepSet = new Set<string>();
 
-      const textAssets: { fileName: string; code: string }[] = [];
+      const textRefs = collectTextRefs(bundle);
 
-      for (const asset of Object.values(bundle)) {
-        if (asset.type !== 'asset') continue;
-        if (!textExts.some((ext) => asset.fileName.endsWith(ext))) continue;
-
-        textAssets.push({ fileName: asset.fileName, code: asset.source.toString() });
-      }
-
-      if (textAssets.length > 0) {
+      if (textRefs.length > 0) {
         for (const [rasterName, asset] of Object.entries(bundle)) {
           if (asset.type !== 'asset' || !rasterExtRE.test(rasterName)) continue;
 
           let shouldKeep = false;
 
-          for (const ta of textAssets) {
+          for (const ta of textRefs) {
             const fromDir = pathPosix.dirname(ta.fileName);
             const rel = pathPosix.relative(fromDir, rasterName);
 
@@ -399,95 +590,65 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
         delete bundle[fileName];
       }
 
-      if (renameMap.size > 0) {
-        for (const asset of Object.values(bundle)) {
-          if (asset.type !== 'asset') continue;
-          if (!textExts.some((ext) => asset.fileName.endsWith(ext))) continue;
+      const keepList = Array.from(keepSet);
 
-          const fromDir = pathPosix.dirname(asset.fileName);
+      if (renameMap.size > 0 || keepList.length > 0) {
+        for (const item of Object.values(bundle)) {
+          if (item.type === 'asset') {
+            if (!isTextLikeAssetFileName(item.fileName)) continue;
 
-          let code = asset.source.toString();
+            const fromDir = pathPosix.dirname(item.fileName);
 
-          for (const [oldName, newName] of renameMap) {
-            const oldRel = pathPosix.relative(fromDir, oldName);
-            const newRel = pathPosix.relative(fromDir, newName);
+            let code = item.source.toString();
 
-            const variantPairs: Array<[string, string]> = [
-              [oldName, newName],
-              [oldRel, newRel],
-            ];
-
-            if (!oldRel.startsWith('.') && !oldRel.startsWith('/')) {
-              variantPairs.push([`./${oldRel}`, `./${newRel}`]);
+            if (renameMap.size > 0) {
+              code = applyRenameMapToString(code, fromDir, renameMap);
             }
 
-            for (const [fromPath, toPath] of variantPairs) {
-              const re = new RegExp(
-                `(${escapeRe(fromPath)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
-                'g',
-              );
-
-              code = code.replace(
-                re,
-                (_m: string, _p: string, qPart?: string, hashPart?: string) =>
-                  `${toPath}${qPart ?? ''}${hashPart ?? ''}`,
-              );
+            if (keepList.length > 0) {
+              code = applyKeepStripToString(code, fromDir, keepList);
             }
+
+            item.source = code;
+            continue;
           }
 
-          asset.source = code;
-        }
-      }
+          if (item.type === 'chunk') {
+            if (!isChunkFileName(item.fileName)) continue;
 
-      {
-        const keepList = Array.from(keepSet);
+            const fromDir = pathPosix.dirname(item.fileName);
+            const originalCode = item.code;
+            const ms = new MagicString(originalCode);
 
-        if (keepList.length > 0) {
-          for (const asset of Object.values(bundle)) {
-            if (asset.type !== 'asset') continue;
-            if (!textExts.some((ext) => asset.fileName.endsWith(ext))) continue;
-
-            const fromDir = pathPosix.dirname(asset.fileName);
-
-            let code = asset.source.toString();
-
-            for (const fileName of keepList) {
-              const rel = pathPosix.relative(fromDir, fileName);
-              const candidates = new Set<string>();
-
-              candidates.add(fileName);
-              candidates.add(rel);
-
-              if (!rel.startsWith('.') && !rel.startsWith('/')) {
-                candidates.add('./' + rel);
-              }
-
-              for (const cand of candidates) {
-                const re = new RegExp(
-                  `(${escapeRe(cand)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
-                  'g',
-                );
-
-                code = code.replace(
-                  re,
-                  (_m: string, fname: string, qPart?: string, hashPart?: string) => {
-                    if (!qPart) return fname + (hashPart ?? '');
-
-                    const cleaned = stripKeepFromQuery((qPart || '') + (hashPart || ''));
-
-                    return fname + cleaned;
-                  },
-                );
-
-                const simple = new RegExp(
-                  `(${escapeRe(cand)})\\?${KEEP_FLAG}(?![^"'\\s)><#])`,
-                  'g',
-                );
-                code = code.replace(simple, '$1');
-              }
+            if (renameMap.size > 0) {
+              applyRenameMapToMagicString(ms, originalCode, fromDir, renameMap);
             }
 
-            asset.source = code;
+            if (keepList.length > 0) {
+              applyKeepStripToMagicString(ms, originalCode, fromDir, keepList);
+            }
+
+            if (!ms.hasChanged()) continue;
+
+            item.code = ms.toString();
+
+            if (item.map) {
+              const editMap = ms.generateMap({
+                hires: true,
+                file: item.fileName,
+                source: item.fileName,
+                includeContent: true,
+              });
+
+              const prevMap = item.map as unknown as RemappingSourceMapInput;
+              const editInput = editMap as unknown as RemappingSourceMapInput;
+              const loader: RemappingSourceMapLoader = (source: string) =>
+                source === item.fileName ? prevMap : null;
+
+              const combined = remapping(editInput, loader, true);
+
+              item.map = combined as unknown as RollupSourceMap;
+            }
           }
         }
       }
