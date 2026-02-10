@@ -35,11 +35,13 @@ import singleImageFormat from 'vite-plugin-single-image-format';
 export default defineConfig({
   plugins: [
     singleImageFormat({
-      format: 'avif',           // 'webp' | 'png' | 'avif' (default: 'webp')
-      reencode: true,           // also re-compress files already in the target format
-      htmlSizeMode: 'add-only', // 'off' | 'add-only' | 'overwrite' (default: 'add-only')
-      hashInName: true,         // add content-hash to filename (e.g. name-<hash>.avif)
-      hashLength: 8,            // length of the hash prefix (default: 8)
+      format: 'avif',            // 'webp' | 'png' | 'avif' (default: 'webp')
+      reencode: true,            // also re-compress files already in the target format
+      htmlSizeMode: 'add-only',  // 'off' | 'add-only' | 'overwrite' (default: 'add-only')
+      hashInName: true,          // add content-hash to filename (e.g. name-<hash>.avif)
+      hashLength: 8,             // length of the hash prefix (default: 8)
+      maxConcurrent: 1,          // limit parallel sharp jobs (encode + metadata). CI/OOM-friendly
+      sharpConcurrency: 1,       // limit libvips threads per job (global). Further reduces peak memory
       avif: {
         quality: 60,
         speed: 5
@@ -85,9 +87,29 @@ Example:
 | `htmlSizeMode` |           `'off'` &#124; `'add-only'` &#124; `'overwrite'`           | `'add-only'` | Controls writing intrinsic `width`/`height` to `<img>` in generated HTML. |
 |  `hashInName`  |                              `boolean`                               |   `false`    | Insert content hash into file name (`name-<hash>.<ext>`); updates refs. Passthrough images are also hashed. Assets with `?imgfmt=keep` remain unchanged. |
 |  `hashLength`  |                              `number`                                |     `8`      | Length of hex SHA-256 prefix used as `<hash>` (range: 1–64).              |
+| `maxConcurrent` |                              `number`                                |     `2`      | Limits how many `sharp` operations run at once (encode + metadata). Use `1–2` to reduce peak memory in CI. |
+| `sharpConcurrency` |                           `number`                                 |   (unset)    | Sets `sharp.concurrency()` (libvips thread pool) for the current process. Lower values reduce peak memory but can slow builds. |
 |     `webp`     | [Sharp WebpOptions](https://sharp.pixelplumbing.com/api-output#webp) | see defaults | Options forwarded to `sharp().webp()`.                                    |
 |     `png`      |  [Sharp PngOptions](https://sharp.pixelplumbing.com/api-output#png)  | see defaults | Options forwarded to `sharp().png()`.                                     |
 |     `avif`     | [Sharp AvifOptions](https://sharp.pixelplumbing.com/api-output#avif) | see defaults | Options forwarded to `sharp().avif()`.                                    |
+
+<br>
+
+# Memory / CI notes
+Image encoding can be memory-intensive, especially when many large assets are processed in parallel.
+
+- Use `maxConcurrent: 1` (or `2`) to cap the number of simultaneous `sharp()` jobs.
+- Optionally set `sharpConcurrency: 1` to reduce libvips internal parallelism and further lower peak memory.
+
+Example (CI-safe):
+
+```ts
+singleImageFormat({
+  format: 'webp',
+  maxConcurrent: 1,
+  sharpConcurrency: 1,
+})
+```
 
 <br>
 

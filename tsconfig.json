@@ -1,19 +1,15 @@
 {
   "compilerOptions": {
     "isolatedModules": true,
-    "target": "ESNext",
+    "target": "ES2022",
     "module": "ESNext",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "noImplicitAny": true,
     "lib": ["ES2022"]
   },
-  "include": [
-    "src",
-    "vite-env.d.ts",
-    "vite.config.ts"
-  ]
+  "include": ["src", "vite-env.d.ts", "vite.config.ts"]
 }

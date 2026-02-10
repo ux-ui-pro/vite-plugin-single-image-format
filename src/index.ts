@@ -1,13 +1,14 @@
-import type { Plugin } from 'vite';
-import type { OutputBundle, NormalizedOutputOptions, SourceMap as RollupSourceMap } from 'rollup';
-import { posix as pathPosix } from 'path';
-import { createHash } from 'crypto';
-import sharp from 'sharp';
-import MagicString from 'magic-string';
+import { createHash } from 'node:crypto';
+import { posix as pathPosix } from 'node:path';
 import remapping, {
   type SourceMapInput as RemappingSourceMapInput,
   type SourceMapLoader as RemappingSourceMapLoader,
 } from '@ampproject/remapping';
+import MagicString from 'magic-string';
+import pLimit from 'p-limit';
+import type { NormalizedOutputOptions, OutputBundle, SourceMap as RollupSourceMap } from 'rollup';
+import sharp from 'sharp';
+import type { Plugin } from 'vite';
 
 export interface WebpOptions {
   quality?: number;
@@ -39,6 +40,8 @@ export interface SingleImageFormatOptions {
   htmlSizeMode?: HtmlSizeMode;
   hashInName?: boolean;
   hashLength?: number;
+  maxConcurrent?: number;
+  sharpConcurrency?: number;
 }
 
 export default function singleImageFormat(userOpts: SingleImageFormatOptions = {}): Plugin {
@@ -51,6 +54,9 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
     htmlSizeMode = 'add-only',
     hashInName = false,
     hashLength = 8,
+
+    maxConcurrent = 2,
+    sharpConcurrency,
   } = userOpts;
 
   const defaultWebp: Required<WebpOptions> = {
@@ -98,15 +104,12 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
     for (const item of Object.values(bundle)) {
       if (item.type === 'asset') {
         if (!isTextLikeAssetFileName(item.fileName)) continue;
-
         refs.push({ fileName: item.fileName, code: item.source.toString() });
-
         continue;
       }
 
       if (item.type === 'chunk') {
         if (!isChunkFileName(item.fileName)) continue;
-
         refs.push({ fileName: item.fileName, code: item.code });
       }
     }
@@ -116,7 +119,6 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
 
   function hasAttr(str: string, attr: 'width' | 'height'): boolean {
     const re = new RegExp(`\\b${attr}\\s*=`, 'i');
-
     return re.test(str);
   }
 
@@ -134,8 +136,8 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
     for (const finalName of dimensionMap.keys()) {
       if (
         cleaned.endsWith(finalName) ||
-        cleaned.endsWith('./' + finalName) ||
-        cleaned.endsWith('/' + finalName)
+        cleaned.endsWith(`./${finalName}`) ||
+        cleaned.endsWith(`/${finalName}`)
       ) {
         return finalName;
       }
@@ -153,11 +155,9 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
     selfClose: string,
   ): string {
     const finalName = matchFinalName(src);
-
     if (!finalName) return full;
 
     const dims = dimensionMap.get(finalName);
-
     if (!dims) return full;
 
     if (htmlSizeMode === 'overwrite') {
@@ -188,7 +188,7 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
     const qsPart = hasQ ? qsPartRaw.slice(1) : qsPartRaw;
 
     if (!qsPart) {
-      return (hasQ ? '?' : '') + (hashPart ? '#' + hashPart : '');
+      return (hasQ ? '?' : '') + (hashPart ? `#${hashPart}` : '');
     }
 
     const keptParams = qsPart
@@ -199,9 +199,8 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
         return !(k === 'imgfmt' && v === 'keep');
       });
 
-    const rebuilt = keptParams.length ? '?' + keptParams.join('&') : '';
-
-    return rebuilt + (hashPart ? '#' + hashPart : '');
+    const rebuilt = keptParams.length ? `?${keptParams.join('&')}` : '';
+    return rebuilt + (hashPart ? `#${hashPart}` : '');
   }
 
   function applyRenameMapToString(
@@ -225,10 +224,7 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
       }
 
       for (const [fromPath, toPath] of variantPairs) {
-        const re = new RegExp(
-          `(${escapeRe(fromPath)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
-          'g',
-        );
+        const re = new RegExp(`(${escapeRe(fromPath)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`, 'g');
 
         next = next.replace(
           re,
@@ -252,25 +248,17 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
       candidates.add(rel);
 
       if (!rel.startsWith('.') && !rel.startsWith('/')) {
-        candidates.add('./' + rel);
+        candidates.add(`./${rel}`);
       }
 
       for (const cand of candidates) {
-        const re = new RegExp(
-          `(${escapeRe(cand)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
-          'g',
-        );
+        const re = new RegExp(`(${escapeRe(cand)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`, 'g');
 
-        next = next.replace(
-          re,
-          (_m: string, fname: string, qPart?: string, hashPart?: string) => {
-            if (!qPart) return fname + (hashPart ?? '');
-
-            const cleaned = stripKeepFromQuery((qPart || '') + (hashPart || ''));
-
-            return fname + cleaned;
-          },
-        );
+        next = next.replace(re, (_m: string, fname: string, qPart?: string, hashPart?: string) => {
+          if (!qPart) return fname + (hashPart ?? '');
+          const cleaned = stripKeepFromQuery((qPart || '') + (hashPart || ''));
+          return fname + cleaned;
+        });
 
         const simple = new RegExp(`(${escapeRe(cand)})\\?${KEEP_FLAG}(?![^"'\\s)><#])`, 'g');
         next = next.replace(simple, '$1');
@@ -300,19 +288,15 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
       }
 
       for (const [fromPath, toPath] of variantPairs) {
-        const re = new RegExp(
-          `(${escapeRe(fromPath)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
-          'g',
-        );
+        const re = new RegExp(`(${escapeRe(fromPath)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`, 'g');
 
-        let m: RegExpExecArray | null;
-
-        while ((m = re.exec(originalCode))) {
+        let m = re.exec(originalCode);
+        while (m !== null) {
           const qPart = m[2] ?? '';
           const hashPart = m[3] ?? '';
           const replacement = `${toPath}${qPart}${hashPart}`;
-
           ms.overwrite(m.index, m.index + m[0].length, replacement);
+          m = re.exec(originalCode);
         }
       }
     }
@@ -332,18 +316,14 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
       candidates.add(rel);
 
       if (!rel.startsWith('.') && !rel.startsWith('/')) {
-        candidates.add('./' + rel);
+        candidates.add(`./${rel}`);
       }
 
       for (const cand of candidates) {
-        const re = new RegExp(
-          `(${escapeRe(cand)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`,
-          'g',
-        );
+        const re = new RegExp(`(${escapeRe(cand)})(\\?[^"'\\s)><#]*?)?(#[^"'\\s)><]*)?`, 'g');
 
-        let m: RegExpExecArray | null;
-
-        while ((m = re.exec(originalCode))) {
+        let m = re.exec(originalCode);
+        while (m !== null) {
           const fname = m[1] ?? '';
           const qPart = m[2] ?? '';
           const hashPart = m[3] ?? '';
@@ -354,12 +334,14 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
           const replacement = fname + cleaned;
 
           ms.overwrite(m.index, m.index + m[0].length, replacement);
+          m = re.exec(originalCode);
         }
 
         const simple = new RegExp(`(${escapeRe(cand)})\\?${KEEP_FLAG}(?![^"'\\s)><#])`, 'g');
-
-        while ((m = simple.exec(originalCode))) {
+        m = simple.exec(originalCode);
+        while (m !== null) {
           ms.overwrite(m.index, m.index + m[0].length, m[1] ?? '');
+          m = simple.exec(originalCode);
         }
       }
     }
@@ -367,16 +349,11 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
 
   function hasGenericAttr(str: string, attrName: string): boolean {
     const re = new RegExp(`\\b${attrName}\\s*=`, 'i');
-
     return re.test(str);
   }
 
   function stripNamedAttr(str: string, attrName: string): string {
-    const re = new RegExp(
-      String.raw`(^|\s+)${attrName}\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`,
-      'gi',
-    );
-
+    const re = new RegExp(String.raw`(^|\s+)${attrName}\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`, 'gi');
     return str.replace(re, '$1');
   }
 
@@ -409,9 +386,8 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
       const cleaned = urlPart.split(/[?#]/)[0];
       const m = cleaned.match(/\.([a-z0-9]+)$/i);
 
-      if (m && m[1]) {
+      if (m?.[1]) {
         const mime = extToMime(m[1]);
-
         if (mime) return mime;
       }
     }
@@ -422,21 +398,60 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
   function computeContentHash(buffer: Buffer, length: number): string {
     const full = createHash('sha256').update(buffer).digest('hex');
     const len = Math.max(1, Math.min(length, full.length));
-
     return full.slice(0, len);
   }
 
   function addHashToFileName(fileName: string, hash: string, delimiter = '-'): string {
     const parsed = pathPosix.parse(fileName);
     const base = `${parsed.name}${delimiter}${hash}${parsed.ext}`;
-
     return parsed.dir ? `${parsed.dir}/${base}` : base;
+  }
+
+  function clampInt(n: unknown, fallback: number): number {
+    if (typeof n !== 'number' || !Number.isFinite(n)) return fallback;
+    return Math.max(1, Math.floor(n));
+  }
+
+  const limit = pLimit(clampInt(maxConcurrent, 2));
+  let sharpConcurrencyApplied = false;
+
+  async function probeInputSize(
+    inputBuffer: Buffer,
+    debugTag: string,
+  ): Promise<{ width: number; height: number } | undefined> {
+    try {
+      const meta = await limit(() => sharp(inputBuffer).metadata());
+      if (meta.width && meta.height) return { width: meta.width, height: meta.height };
+      return undefined;
+    } catch (err) {
+      if (process?.env?.NODE_ENV === 'development') {
+        console.debug(`[singleImageFormat] metadata probe failed (${debugTag})`, err);
+      }
+      return undefined;
+    }
+  }
+
+  async function encodeToTarget(inputBuffer: Buffer): Promise<Buffer> {
+    return limit(async () => {
+      const s = sharp(inputBuffer);
+      if (format === 'webp') return s.webp(webpOpts).toBuffer();
+      if (format === 'png') return s.png(pngOpts).toBuffer();
+      return s.avif(avifOpts).toBuffer();
+    });
   }
 
   return {
     name: 'vite-plugin-single-image-format',
     apply: 'build',
     enforce: 'post',
+
+    configResolved() {
+      if (sharpConcurrencyApplied) return;
+      if (typeof sharpConcurrency === 'number') {
+        sharp.concurrency(clampInt(sharpConcurrency, 1));
+      }
+      sharpConcurrencyApplied = true;
+    },
 
     async generateBundle(_options: NormalizedOutputOptions, bundle: OutputBundle): Promise<void> {
       const renameMap = new Map<string, string>();
@@ -455,20 +470,17 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
             const rel = pathPosix.relative(fromDir, rasterName);
 
             const candidates = new Set<string>();
-
             candidates.add(rasterName);
             candidates.add(rel);
 
             if (!rel.startsWith('.') && !rel.startsWith('/')) {
-              candidates.add('./' + rel);
+              candidates.add(`./${rel}`);
             }
 
             for (const cand of candidates) {
               const needle = `${cand}?${KEEP_FLAG}`;
-
               if (ta.code.includes(needle)) {
                 shouldKeep = true;
-
                 break;
               }
             }
@@ -476,9 +488,7 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
             if (shouldKeep) break;
           }
 
-          if (shouldKeep) {
-            keepSet.add(rasterName);
-          }
+          if (shouldKeep) keepSet.add(rasterName);
         }
       }
 
@@ -488,42 +498,21 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
         const inputBuffer: Buffer =
           typeof asset.source === 'string' ? Buffer.from(asset.source) : Buffer.from(asset.source);
 
+        const inputSize = await probeInputSize(
+          inputBuffer,
+          keepSet.has(fileName) ? 'keep' : 'input',
+        );
+
         if (keepSet.has(fileName)) {
-          try {
-            const meta = await sharp(inputBuffer).metadata();
-
-            if (meta.width && meta.height) {
-              dimensionMap.set(fileName, { width: meta.width, height: meta.height });
-            }
-          } catch (err) {
-            if (process?.env?.NODE_ENV === 'development') {
-              console.debug('[singleImageFormat] metadata probe failed (keep)', err);
-            }
-          }
-
+          if (inputSize) dimensionMap.set(fileName, inputSize);
           continue;
         }
 
         const isTargetExt = fileName.toLowerCase().endsWith(`.${format}`);
 
         if (isTargetExt && !reencode) {
-          let size: { width: number; height: number } | undefined;
-
-          try {
-            const meta = await sharp(inputBuffer).metadata();
-
-            if (meta.width && meta.height) {
-              size = { width: meta.width, height: meta.height };
-            }
-          } catch (err) {
-            if (process?.env?.NODE_ENV === 'development') {
-              console.debug('[singleImageFormat] metadata probe failed (passthrough)', err);
-            }
-          }
-
           if (!hashInName) {
-            if (size) dimensionMap.set(fileName, size);
-
+            if (inputSize) dimensionMap.set(fileName, inputSize);
             continue;
           }
 
@@ -531,40 +520,23 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
           const hashedName = addHashToFileName(fileName, hash);
 
           if (bundle[hashedName]) {
-            if (size) dimensionMap.set(fileName, size);
-
+            if (inputSize) dimensionMap.set(fileName, inputSize);
             continue;
           }
 
           this.emitFile({ type: 'asset', fileName: hashedName, source: inputBuffer });
-
           renameMap.set(fileName, hashedName);
 
-          if (size) dimensionMap.set(hashedName, size);
-
+          if (inputSize) dimensionMap.set(hashedName, inputSize);
           delete bundle[fileName];
-
           continue;
         }
 
-        const outputBuffer =
-          format === 'webp'
-            ? await sharp(inputBuffer).webp(webpOpts).toBuffer()
-            : format === 'png'
-              ? await sharp(inputBuffer).png(pngOpts).toBuffer()
-              : await sharp(inputBuffer).avif(avifOpts).toBuffer();
-
-        const outMeta = await sharp(outputBuffer).metadata();
-        const size =
-          outMeta.width && outMeta.height
-            ? { width: outMeta.width, height: outMeta.height }
-            : undefined;
+        const outputBuffer = await encodeToTarget(inputBuffer);
 
         if (isTargetExt) {
           asset.source = outputBuffer;
-
-          if (size) dimensionMap.set(fileName, size);
-
+          if (inputSize) dimensionMap.set(fileName, inputSize);
           continue;
         }
 
@@ -574,19 +546,15 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
           : targetName;
 
         if (bundle[newName]) {
-          if (size) dimensionMap.set(fileName, size);
-
           asset.source = outputBuffer;
-
+          if (inputSize) dimensionMap.set(fileName, inputSize);
           continue;
         }
 
         this.emitFile({ type: 'asset', fileName: newName, source: outputBuffer });
-
         renameMap.set(fileName, newName);
 
-        if (size) dimensionMap.set(newName, size);
-
+        if (inputSize) dimensionMap.set(newName, inputSize);
         delete bundle[fileName];
       }
 
@@ -598,16 +566,10 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
             if (!isTextLikeAssetFileName(item.fileName)) continue;
 
             const fromDir = pathPosix.dirname(item.fileName);
-
             let code = item.source.toString();
 
-            if (renameMap.size > 0) {
-              code = applyRenameMapToString(code, fromDir, renameMap);
-            }
-
-            if (keepList.length > 0) {
-              code = applyKeepStripToString(code, fromDir, keepList);
-            }
+            if (renameMap.size > 0) code = applyRenameMapToString(code, fromDir, renameMap);
+            if (keepList.length > 0) code = applyKeepStripToString(code, fromDir, keepList);
 
             item.source = code;
             continue;
@@ -620,13 +582,10 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
             const originalCode = item.code;
             const ms = new MagicString(originalCode);
 
-            if (renameMap.size > 0) {
+            if (renameMap.size > 0)
               applyRenameMapToMagicString(ms, originalCode, fromDir, renameMap);
-            }
-
-            if (keepList.length > 0) {
+            if (keepList.length > 0)
               applyKeepStripToMagicString(ms, originalCode, fromDir, keepList);
-            }
 
             if (!ms.hasChanged()) continue;
 
@@ -646,51 +605,45 @@ export default function singleImageFormat(userOpts: SingleImageFormatOptions = {
                 source === item.fileName ? prevMap : null;
 
               const combined = remapping(editInput, loader, true);
-
               item.map = combined as unknown as RollupSourceMap;
             }
           }
         }
       }
 
-      {
-        for (const asset of Object.values(bundle)) {
-          if (asset.type !== 'asset') continue;
-          if (!asset.fileName.endsWith('.html')) continue;
+      for (const asset of Object.values(bundle)) {
+        if (asset.type !== 'asset') continue;
+        if (!asset.fileName.endsWith('.html')) continue;
 
-          const html = asset.source.toString();
-          const sourceTagRE =
-            /<source\s+([^>]*?)srcset=(["'])([^"']+)\2([^>]*?)(\/?)>/gi;
+        const html = asset.source.toString();
+        const sourceTagRE = /<source\s+([^>]*?)srcset=(["'])([^"']+)\2([^>]*?)(\/?)>/gi;
 
-          const newHtml = html.replace(
-            sourceTagRE,
-            (
-              full: string,
-              preAttrs: string,
-              quote: '"' | "'",
-              srcset: string,
-              postAttrs: string,
-              selfClose: string,
-            ): string => {
-              const desiredMime = pickMimeFromSrcset(srcset);
+        const newHtml = html.replace(
+          sourceTagRE,
+          (
+            full: string,
+            preAttrs: string,
+            quote: '"' | "'",
+            srcset: string,
+            postAttrs: string,
+            selfClose: string,
+          ): string => {
+            const desiredMime = pickMimeFromSrcset(srcset);
+            if (!desiredMime) return full;
 
-              if (!desiredMime) return full;
+            const hasType = hasGenericAttr(preAttrs + postAttrs, 'type');
 
-              const hasType = hasGenericAttr(preAttrs + postAttrs, 'type');
+            if (hasType) {
+              const newPre = stripNamedAttr(preAttrs, 'type');
+              const newPost = stripNamedAttr(postAttrs, 'type');
+              return `<source ${newPre}srcset=${quote}${srcset}${quote}${newPost} type="${desiredMime}"${selfClose}>`;
+            }
 
-              if (hasType) {
-                const newPre = stripNamedAttr(preAttrs, 'type');
-                const newPost = stripNamedAttr(postAttrs, 'type');
+            return `<source ${preAttrs}srcset=${quote}${srcset}${quote}${postAttrs} type="${desiredMime}"${selfClose}>`;
+          },
+        );
 
-                return `<source ${newPre}srcset=${quote}${srcset}${quote}${newPost} type="${desiredMime}"${selfClose}>`;
-              }
-
-              return `<source ${preAttrs}srcset=${quote}${srcset}${quote}${postAttrs} type="${desiredMime}"${selfClose}>`;
-            },
-          );
-
-          asset.source = newHtml;
-        }
+        asset.source = newHtml;
       }
 
       if (htmlSizeMode !== 'off' && dimensionMap.size > 0) {

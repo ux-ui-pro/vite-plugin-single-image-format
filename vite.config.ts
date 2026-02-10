@@ -24,6 +24,7 @@ export default defineConfig({
       fileName: (format) => `index.${format}.js`,
     },
     emptyOutDir: true,
+    sourcemap: true,
     rollupOptions: {
       external: externals,
       output: {
